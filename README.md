@@ -41,15 +41,11 @@ Everything is stored locally in your browser with IndexedDB. No external backend
 
 | Dashboard | Models Analytics |
 |---|---|
-| ![Dashboard screenshot](docs/screenshots/dashboard.png) | ![Models screenshot](docs/screenshots/models.png) |
+| ![Dashboard screenshot](https://github.com/NyxAwroo/AnalyticsCivitAI/blob/352ebcf23c6794d20cb5c2ff37feb4287ba78260/screenshots/extension/2026-06-07%2006_51_03-Creator%20Profile%20_%20Civitai%20.png) | ![Models screenshot](https://github.com/NyxAwroo/AnalyticsCivitAI/blob/352ebcf23c6794d20cb5c2ff37feb4287ba78260/screenshots/extension/2026-06-07%2006_51_25-.png) |
 
-| Trends Radar | Competitor Watch |
-|---|---|
-| ![Trends screenshot](docs/screenshots/trends.png) | ![Competitors screenshot](docs/screenshots/competitors.png) |
+<img src="https://github.com/NyxAwroo/AnalyticsCivitAI/blob/352ebcf23c6794d20cb5c2ff37feb4287ba78260/screenshots/extension/2026-06-07%2006_51_51-.png" width="25%">
+<img src="https://github.com/NyxAwroo/AnalyticsCivitAI/blob/352ebcf23c6794d20cb5c2ff37feb4287ba78260/screenshots/extension/2026-06-07%2006_52_07-.png" width="25%">
 
-| Articles | Settings |
-|---|---|
-| ![Articles screenshot](docs/screenshots/articles.png) | ![Settings screenshot](docs/screenshots/settings.png) |
 
 ---
 
@@ -152,6 +148,9 @@ npm run build
 5. Copy the token.
 6. Open AnalyticsCivitAI → **Settings**.
 7. Paste the key into **CivitAI API key** and click **Validate**.
+
+<img alt="" src="screenshots/Find API key on CivitAI/2026-06-07 06_55_55-Manage your Account - Civitai .png" width="" height="170">
+<img alt="" src="screenshots/Find API key on CivitAI/2026-06-07 06_56_24-Manage your Account - Civitai .png" width="" height="430">
 
 Recommended permissions: use a key that can read your public/private creator data needed by the API. The key is stored locally in your browser.
 
