@@ -1,0 +1,7 @@
+export const CIVITAI_API_BASE_URL = 'https://civitai.com/api/v1';
+export const SETTINGS_KEY = 'main';
+export const COLLECTION_ALARM_NAME = 'analytics-civitai-collect';
+export const WEEKLY_SUMMARY_ALARM_NAME = 'analytics-civitai-weekly-summary';
+export const DEFAULT_COLLECTION_FREQUENCY_HOURS = 6;
+export const SNAPSHOT_RETENTION_DAYS = 90;
+export const API_RATE_LIMIT_DELAY_MS = 1100;
