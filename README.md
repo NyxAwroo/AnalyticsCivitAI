@@ -37,8 +37,6 @@ Everything is stored locally in your browser with IndexedDB. No external backend
 
 ## Screenshots
 
-> Replace these placeholders with your own screenshots before publishing the repository.
-
 | Dashboard | Models Analytics |
 |---|---|
 | ![Dashboard screenshot](https://github.com/NyxAwroo/AnalyticsCivitAI/blob/352ebcf23c6794d20cb5c2ff37feb4287ba78260/screenshots/extension/2026-06-07%2006_51_03-Creator%20Profile%20_%20Civitai%20.png) | ![Models screenshot](https://github.com/NyxAwroo/AnalyticsCivitAI/blob/352ebcf23c6794d20cb5c2ff37feb4287ba78260/screenshots/extension/2026-06-07%2006_51_25-.png) |
