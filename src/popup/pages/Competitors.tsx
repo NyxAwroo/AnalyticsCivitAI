@@ -1,10 +1,15 @@
-import { ExternalLink, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { ExternalLink, FileHeart, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import HealthBadge from '../components/HealthBadge';
 import TimeSeriesChart, { type TimeSeriesLine, type TimeSeriesPoint } from '../components/TimeSeriesChart';
 import { searchModels, type CivitAIModel } from '../../api/civitai';
-import { collectNow, trackCompetitorFromInput } from '../../storage/collect';
+import {
+  collectNow,
+  collectSingleModel,
+  importFavoriteModels,
+  trackCompetitorFromInput
+} from '../../storage/collect';
 import {
   getCompetitorTrackedModels,
   getLatestModelSnapshots,
@@ -12,14 +17,19 @@ import {
   getOwnTrackedModels,
   getSettings,
   removeTrackedModel,
+  updateTrackedModelNotes,
   type ModelSnapshot,
   type TrackedModel
 } from '../../storage/db';
 import {
   calculateLatestDelta,
+  calculateHealthScore,
   calculateVelocity,
   getHealthStatus
 } from '../../utils/analytics';
+
+const pageSize = 10;
+type CompetitorSort = 'downloads' | 'velocity' | 'health' | 'name';
 
 function getLatestSnapshot(snapshots: ModelSnapshot[]): ModelSnapshot | undefined {
   return [...snapshots].sort((a, b) => b.timestamp - a.timestamp)[0];
@@ -38,7 +48,7 @@ function parseCivitAIModelId(input: string | undefined): number | undefined {
     return undefined;
   }
 
-  const match = input.match(/civitai\.com\/models\/(\d+)/i);
+  const match = input.match(/civitai\.(?:com|red)\/models\/(\d+)/i);
   return match ? Number(match[1]) : undefined;
 }
 
@@ -111,6 +121,12 @@ export default function Competitors(): JSX.Element {
   const [isAdding, setIsAdding] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshingModelId, setRefreshingModelId] = useState<number | undefined>();
+  const [pendingRemoveId, setPendingRemoveId] = useState<number | undefined>();
+  const [filterText, setFilterText] = useState('');
+  const [sortBy, setSortBy] = useState<CompetitorSort>('downloads');
+  const [page, setPage] = useState(1);
+  const [groupByCreator, setGroupByCreator] = useState(false);
   const [error, setError] = useState('');
 
   async function loadCompetitors(): Promise<void> {
@@ -142,11 +158,31 @@ export default function Competitors(): JSX.Element {
   useEffect(() => {
     async function detectActiveCivitAIModel(): Promise<void> {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      setActiveTabModelId(parseCivitAIModelId(tabs[0]?.url));
+      const queryModelId = Number(new URLSearchParams(window.location.search).get('modelId'));
+      setActiveTabModelId(
+        Number.isInteger(queryModelId) && queryModelId > 0
+          ? queryModelId
+          : parseCivitAIModelId(tabs[0]?.url)
+      );
     }
 
     void detectActiveCivitAIModel();
   }, []);
+
+  useEffect(() => {
+    if (searchQuery.trim().length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void handleSearch();
+    }, 400);
+
+    return () => window.clearTimeout(timer);
+    // handleSearch reads the latest query after debounce; the timer is keyed by searchQuery.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
 
   const totals = useMemo(() => {
     let downloads = 0;
@@ -232,7 +268,11 @@ export default function Competitors(): JSX.Element {
 
     try {
       const settings = await getSettings();
-      const response = await searchModels(settings.apiKey, searchQuery.trim());
+      const response = await searchModels(
+        settings.apiKey,
+        searchQuery.trim(),
+        settings.apiBaseUrl
+      );
       setSearchResults(response.items);
     } catch (searchError) {
       setError(searchError instanceof Error ? searchError.message : 'Recherche impossible.');
@@ -255,10 +295,175 @@ export default function Competitors(): JSX.Element {
     }
   }
 
+  async function handleRefreshModel(modelId: number): Promise<void> {
+    setRefreshingModelId(modelId);
+    setError('');
+
+    try {
+      await collectSingleModel(modelId);
+      await loadCompetitors();
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : 'Snapshot impossible.');
+    } finally {
+      setRefreshingModelId(undefined);
+    }
+  }
+
+  async function handleImportFavorites(): Promise<void> {
+    setIsAdding(true);
+    setError('');
+
+    try {
+      const imported = await importFavoriteModels();
+      await loadCompetitors();
+      setError(`${imported.length} favoris importés dans la veille.`);
+    } catch (importError) {
+      setError(importError instanceof Error ? importError.message : 'Import favoris impossible.');
+    } finally {
+      setIsAdding(false);
+    }
+  }
+
+  async function handleNotesChange(modelId: number, notes: string): Promise<void> {
+    setCompetitors((currentCompetitors) =>
+      currentCompetitors.map((competitor) =>
+        competitor.modelId === modelId ? { ...competitor, notes } : competitor
+      )
+    );
+    await updateTrackedModelNotes(modelId, notes);
+  }
+
   async function handleRemove(modelId: number): Promise<void> {
     setError('');
     await removeTrackedModel(modelId);
+    setPendingRemoveId(undefined);
     await loadCompetitors();
+  }
+
+  const sortedCompetitors = useMemo(() => {
+    return competitors
+      .filter((competitor) => {
+        const haystack = `${competitor.name} ${competitor.creatorUsername ?? ''} ${competitor.type} ${competitor.baseModel} ${competitor.tags.join(' ')}`.toLowerCase();
+        return haystack.includes(filterText.trim().toLowerCase());
+      })
+      .sort((a, b) => {
+        const historyA = histories.get(a.modelId) ?? [];
+        const historyB = histories.get(b.modelId) ?? [];
+
+        if (sortBy === 'name') {
+          return a.name.localeCompare(b.name);
+        }
+
+        if (sortBy === 'health') {
+          return calculateHealthScore(historyB) - calculateHealthScore(historyA);
+        }
+
+        if (sortBy === 'velocity') {
+          return calculateVelocity(historyB).downloadsPerDay - calculateVelocity(historyA).downloadsPerDay;
+        }
+
+        return (getLatestSnapshot(historyB)?.downloads ?? 0) - (getLatestSnapshot(historyA)?.downloads ?? 0);
+      });
+  }, [competitors, filterText, histories, sortBy]);
+  const pagedCompetitors = sortedCompetitors.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = Math.max(1, Math.ceil(sortedCompetitors.length / pageSize));
+  const groupedCompetitors = useMemo(() => {
+    const groups = new Map<string, TrackedModel[]>();
+
+    for (const competitor of pagedCompetitors) {
+      const creator = competitor.creatorUsername ?? 'Créateur inconnu';
+      groups.set(creator, [...(groups.get(creator) ?? []), competitor]);
+    }
+
+    return [...groups.entries()];
+  }, [pagedCompetitors]);
+
+  function renderCompetitor(competitor: TrackedModel): JSX.Element {
+    const latest = latestSnapshots.get(competitor.modelId);
+    const history = histories.get(competitor.modelId) ?? [];
+    const delta = calculateLatestDelta(history);
+
+    return (
+      <div
+        key={competitor.modelId}
+        className="grid grid-cols-[1fr_auto] gap-3 border-b border-white/10 px-3 py-3 last:border-b-0"
+      >
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="truncate text-sm font-medium text-white">{competitor.name}</p>
+            <HealthBadge status={getHealthStatus(history)} />
+          </div>
+          <p className="mt-1 text-xs text-gray-400">
+            {competitor.type} · {competitor.baseModel} · {competitor.creatorUsername ?? 'n/a'}
+          </p>
+          <p className="mt-1 text-[11px] text-gray-500">
+            Likes {(latest?.likes ?? 0).toLocaleString('fr-FR')} · Comments{' '}
+            {(latest?.comments ?? 0).toLocaleString('fr-FR')}
+          </p>
+          <textarea
+            value={competitor.notes ?? ''}
+            onChange={(event) => void handleNotesChange(competitor.modelId, event.target.value)}
+            placeholder="Note personnelle"
+            className="mt-2 min-h-14 w-full resize-y rounded border border-white/10 bg-gray-950 px-2 py-1 text-xs text-white placeholder:text-gray-500"
+          />
+          {pendingRemoveId === competitor.modelId ? (
+            <div className="mt-2 flex items-center gap-2 text-xs text-amber-100">
+              <span>Supprimer aussi l'historique ?</span>
+              <button
+                type="button"
+                onClick={() => void handleRemove(competitor.modelId)}
+                className="rounded bg-amber-500 px-2 py-1 font-semibold text-gray-950"
+              >
+                Oui
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingRemoveId(undefined)}
+                className="rounded border border-white/10 px-2 py-1 text-gray-200"
+              >
+                Non
+              </button>
+            </div>
+          ) : null}
+        </div>
+        <div className="flex items-start gap-2 text-right">
+          <div className="text-xs">
+            <p className="font-semibold text-white">
+              {(latest?.downloads ?? 0).toLocaleString('fr-FR')}
+            </p>
+            <p className="text-gray-500">
+              DL {delta.downloads >= 0 ? '+' : ''}
+              {delta.downloads.toLocaleString('fr-FR')}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void handleRefreshModel(competitor.modelId)}
+            disabled={refreshingModelId === competitor.modelId}
+            title="Snapshot on-demand"
+            className="flex h-8 w-8 items-center justify-center rounded border border-white/10 text-gray-400 transition hover:bg-white/5 hover:text-violet-200 disabled:opacity-60"
+          >
+            <RefreshCw className={`h-4 w-4 ${refreshingModelId === competitor.modelId ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setPendingRemoveId(competitor.modelId)}
+            title="Retirer"
+            className="flex h-8 w-8 items-center justify-center rounded border border-white/10 text-gray-400 transition hover:bg-white/5 hover:text-rose-200"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void chrome.tabs.create({ url: `https://civitai.com/models/${competitor.modelId}` })}
+            title="Ouvrir sur CivitAI"
+            className="flex h-8 w-8 items-center justify-center rounded border border-white/10 text-gray-400 transition hover:bg-white/5 hover:text-violet-200"
+          >
+            <ExternalLink className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -321,6 +526,51 @@ export default function Competitors(): JSX.Element {
           >
             <Plus className="h-4 w-4" />
             Ajouter
+          </button>
+        </div>
+      </section>
+
+      <section className="rounded border border-white/10 bg-gray-800 p-3">
+        <div className="grid grid-cols-[1fr_auto] gap-2">
+          <label className="flex h-9 items-center gap-2 rounded border border-white/10 bg-gray-950 px-3">
+            <Search className="h-4 w-4 text-violet-300" />
+            <input
+              value={filterText}
+              onChange={(event) => {
+                setFilterText(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Filtrer la veille"
+              className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-gray-500"
+            />
+          </label>
+          <select
+            value={sortBy}
+            onChange={(event) => setSortBy(event.target.value as CompetitorSort)}
+            className="h-9 rounded border border-white/10 bg-gray-950 px-2 text-xs text-white"
+          >
+            <option value="downloads">Downloads ↓</option>
+            <option value="velocity">Vélocité ↓</option>
+            <option value="health">Santé ↓</option>
+            <option value="name">Nom A-Z</option>
+          </select>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setGroupByCreator((current) => !current)}
+            className="inline-flex h-9 items-center justify-center rounded border border-white/10 px-3 text-xs font-semibold text-gray-200 transition hover:bg-white/5"
+          >
+            {groupByCreator ? 'Vue plate' : 'Grouper par créateur'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleImportFavorites()}
+            disabled={isAdding}
+            className="inline-flex h-9 items-center justify-center gap-2 rounded border border-white/10 px-3 text-xs font-semibold text-gray-200 transition hover:bg-white/5 disabled:opacity-60"
+          >
+            <FileHeart className="h-4 w-4" />
+            Importer favoris
           </button>
         </div>
       </section>
@@ -502,61 +752,38 @@ export default function Competitors(): JSX.Element {
           <div className="px-4 py-8 text-center text-sm text-gray-400">
             Ajoute une URL de modèle CivitAI pour commencer le benchmark.
           </div>
-        ) : (
-          competitors.map((competitor) => {
-            const latest = latestSnapshots.get(competitor.modelId);
-            const history = histories.get(competitor.modelId) ?? [];
-            const delta = calculateLatestDelta(history);
-
-            return (
-              <div
-                key={competitor.modelId}
-                className="grid grid-cols-[1fr_auto] gap-3 border-b border-white/10 px-3 py-3 last:border-b-0"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="truncate text-sm font-medium text-white">{competitor.name}</p>
-                    <HealthBadge status={getHealthStatus(history)} />
-                  </div>
-                  <p className="mt-1 text-xs text-gray-400">
-                    {competitor.type} · {competitor.baseModel}
-                  </p>
-                  <p className="mt-1 text-[11px] text-gray-500">
-                    Likes {(latest?.likes ?? 0).toLocaleString('fr-FR')} · Comments{' '}
-                    {(latest?.comments ?? 0).toLocaleString('fr-FR')}
-                  </p>
-                </div>
-                <div className="flex items-center gap-3 text-right">
-                  <div className="text-xs">
-                    <p className="font-semibold text-white">
-                      {(latest?.downloads ?? 0).toLocaleString('fr-FR')}
-                    </p>
-                    <p className="text-gray-500">
-                      DL {delta.downloads >= 0 ? '+' : ''}
-                      {delta.downloads.toLocaleString('fr-FR')}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleRemove(competitor.modelId)}
-                    title="Retirer"
-                    className="flex h-8 w-8 items-center justify-center rounded border border-white/10 text-gray-400 transition hover:bg-white/5 hover:text-rose-200"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void chrome.tabs.create({ url: `https://civitai.com/models/${competitor.modelId}` })}
-                    title="Ouvrir sur CivitAI"
-                    className="flex h-8 w-8 items-center justify-center rounded border border-white/10 text-gray-400 transition hover:bg-white/5 hover:text-violet-200"
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                  </button>
-                </div>
+        ) : groupByCreator ? (
+          groupedCompetitors.map(([creator, creatorModels]) => (
+            <div key={creator} className="border-b border-white/10 last:border-b-0">
+              <div className="bg-gray-900/70 px-3 py-2 text-xs font-semibold text-violet-100">
+                {creator} · {creatorModels.length} modèle{creatorModels.length > 1 ? 's' : ''}
               </div>
-            );
-          })
+              {creatorModels.map(renderCompetitor)}
+            </div>
+          ))
+        ) : (
+          pagedCompetitors.map(renderCompetitor)
         )}
+        {competitors.length > 0 ? (
+          <div className="grid grid-cols-2 gap-2 border-t border-white/10 p-2">
+            <button
+              type="button"
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+              disabled={page <= 1}
+              className="h-8 rounded border border-white/10 text-xs text-gray-200 disabled:opacity-50"
+            >
+              Précédent
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+              disabled={page >= totalPages}
+              className="h-8 rounded border border-white/10 text-xs text-gray-200 disabled:opacity-50"
+            >
+              Suivant
+            </button>
+          </div>
+        ) : null}
       </section>
     </div>
   );

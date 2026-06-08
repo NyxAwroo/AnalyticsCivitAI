@@ -19,10 +19,67 @@ body {
   background: #111827;
 }
 
+body.theme-light {
+  color-scheme: light;
+  background: #f3f4f6;
+  color: #111827;
+}
+
+body.theme-light .bg-civitai-bg,
+body.theme-light .bg-gray-950,
+body.theme-light .bg-gray-900,
+body.theme-light .bg-gray-900\/70,
+body.theme-light .bg-gray-900\/70,
+body.theme-light .bg-gray-800,
+body.theme-light .bg-gray-800\/70 {
+  background-color: #ffffff !important;
+}
+
+body.theme-light .text-white,
+body.theme-light .text-gray-50,
+body.theme-light .text-gray-100,
+body.theme-light .text-gray-200,
+body.theme-light .text-gray-300 {
+  color: #111827 !important;
+}
+
+body.theme-light .text-gray-400,
+body.theme-light .text-gray-500 {
+  color: #4b5563 !important;
+}
+
+body.theme-light .border-white\/10 {
+  border-color: rgba(17, 24, 39, 0.12) !important;
+}
+
+body.theme-light input,
+body.theme-light select,
+body.theme-light textarea {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+}
+
+body.theme-light .hover\:bg-white\/5:hover {
+  background-color: rgba(17, 24, 39, 0.05) !important;
+}
+
+body.theme-light .bg-violet-500\/10,
+body.theme-light .bg-violet-500\/15 {
+  background-color: rgba(124, 58, 237, 0.12) !important;
+}
+
 #root {
   min-width: 420px;
   min-height: 500px;
   max-height: 600px;
+}
+
+body:has(main.min-h-screen),
+body:has(main.min-h-screen) #root {
+  min-width: 0;
+  max-height: none;
+  min-height: 100vh;
+  overflow: auto;
 }
 
 button,

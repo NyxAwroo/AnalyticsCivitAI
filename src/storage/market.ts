@@ -98,7 +98,7 @@ function toTagSnapshots(trends: TrendSnapshot[], timestamp: number): TagSnapshot
 export async function collectTrendingNow(filters: MarketFilters = {}): Promise<TrendSnapshot[]> {
   const settings = await getSettings();
   const timestamp = Date.now();
-  const response = await fetchTrendingModels(settings.apiKey, filters);
+  const response = await fetchTrendingModels(settings.apiKey, filters, settings.apiBaseUrl);
   const trends = response.items.map((model) => toTrendSnapshot(model, timestamp));
   const tagSnapshots = toTagSnapshots(trends, timestamp);
 

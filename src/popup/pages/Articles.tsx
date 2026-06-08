@@ -1,10 +1,11 @@
-import { Clock, FileText, Link2, TrendingUp } from 'lucide-react';
+import { Clock, ExternalLink, FileText, Link2, TrendingUp } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import TimeSeriesChart, { type TimeSeriesPoint } from '../components/TimeSeriesChart';
 import {
   getArticleSnapshots,
   getLatestArticleSnapshots,
+  getLatestTrendSnapshots,
   getModelSnapshotsByModelIds,
   getOwnTrackedModels,
   getTrackedArticles,
@@ -124,6 +125,7 @@ export default function Articles(): JSX.Element {
   const [latestSnapshots, setLatestSnapshots] = useState<Map<number, ArticleSnapshot>>(new Map());
   const [selectedArticleId, setSelectedArticleId] = useState<number | undefined>();
   const [snapshots, setSnapshots] = useState<ArticleSnapshot[]>([]);
+  const [trendDensity, setTrendDensity] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     async function loadArticles(): Promise<void> {
@@ -141,6 +143,16 @@ export default function Articles(): JSX.Element {
       setModelHistories(histories);
       setLatestSnapshots(latest);
       setSelectedArticleId(trackedArticles[0]?.articleId);
+      const trends = await getLatestTrendSnapshots();
+      const density = new Map<string, number>();
+
+      for (const trend of trends) {
+        const date = new Date(trend.publishedAt);
+        const key = `${date.getDay()}-${getHourBandIndex(trend.publishedAt)}`;
+        density.set(key, (density.get(key) ?? 0) + 1);
+      }
+
+      setTrendDensity(density);
     }
 
     void loadArticles();
@@ -223,6 +235,24 @@ export default function Articles(): JSX.Element {
   }, [articles, latestSnapshots]);
 
   const maxHeatmapScore = Math.max(1, ...heatmap.flat());
+  const recommendedSlots = useMemo(() => {
+    const slots: Array<{ label: string; score: number; saturation: number }> = [];
+
+    for (let dayIndex = 0; dayIndex < days.length; dayIndex += 1) {
+      for (let bandIndex = 0; bandIndex < hourBands.length; bandIndex += 1) {
+        const personalScore = heatmap[dayIndex][bandIndex];
+        const saturation = trendDensity.get(`${dayIndex}-${bandIndex}`) ?? 0;
+        const score = personalScore + 25 - saturation * 4;
+        slots.push({
+          label: `${days[dayIndex]} ${hourBands[bandIndex]}`,
+          score,
+          saturation
+        });
+      }
+    }
+
+    return slots.sort((a, b) => b.score - a.score).slice(0, 3);
+  }, [heatmap, trendDensity]);
 
   async function handleLinkedModelChange(modelId: number): Promise<void> {
     if (!selectedArticle) {
@@ -245,18 +275,33 @@ export default function Articles(): JSX.Element {
           <h2 className="text-sm font-semibold text-white">Articles</h2>
           <p className="text-xs text-gray-400">Vues, engagement et timing</p>
         </div>
-        <select
-          value={selectedArticleId ?? ''}
-          onChange={(event) => setSelectedArticleId(Number(event.target.value))}
-          className="h-9 max-w-[190px] rounded border border-white/10 bg-gray-900 px-2 text-xs text-white"
-        >
-          {articles.length === 0 ? <option value="">Aucun article</option> : null}
-          {articles.map((article) => (
-            <option key={article.articleId} value={article.articleId}>
-              {article.title}
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={selectedArticleId ?? ''}
+            onChange={(event) => setSelectedArticleId(Number(event.target.value))}
+            className="h-9 max-w-[170px] rounded border border-white/10 bg-gray-900 px-2 text-xs text-white"
+          >
+            {articles.length === 0 ? <option value="">Aucun article</option> : null}
+            {articles.map((article) => (
+              <option key={article.articleId} value={article.articleId}>
+                {article.title}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            disabled={!selectedArticleId}
+            title="Voir sur CivitAI"
+            onClick={() =>
+              selectedArticleId
+                ? void chrome.tabs.create({ url: `https://civitai.com/articles/${selectedArticleId}` })
+                : undefined
+            }
+            className="inline-flex h-9 w-9 items-center justify-center rounded border border-white/10 text-gray-200 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <ExternalLink className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">
@@ -287,6 +332,27 @@ export default function Articles(): JSX.Element {
             { dataKey: 'comments', label: 'Commentaires', color: '#34D399' }
           ]}
         />
+      </div>
+
+      <div className="rounded border border-white/10 bg-gray-800 p-3">
+        <div className="mb-3 flex items-center gap-2">
+          <Clock className="h-4 w-4 text-violet-300" />
+          <p className="text-sm font-medium text-white">Recommandation publication</p>
+        </div>
+        {recommendedSlots.length === 0 ? (
+          <p className="text-sm text-gray-400">Collecte articles et trends nécessaire.</p>
+        ) : (
+          <div className="space-y-2">
+            {recommendedSlots.map((slot) => (
+              <div key={slot.label} className="grid grid-cols-[1fr_auto] gap-2 text-xs">
+                <span className="font-medium text-white">{slot.label}</span>
+                <span className="text-gray-400">
+                  saturation {slot.saturation} · score {Math.round(slot.score)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="rounded border border-white/10 bg-gray-800 p-3">
@@ -336,8 +402,16 @@ export default function Articles(): JSX.Element {
         <p className="mt-2 text-xs text-gray-400">
           {impact?.hasEnoughData
             ? `${impact.modelName} a gagné +${impact.downloads72h.toLocaleString('fr-FR')} downloads dans la fenêtre suivie.`
-            : 'Associe un modèle et collecte au moins deux snapshots autour de la publication.'}
+            : linkedModelId
+              ? 'Collecte au moins deux snapshots autour de la publication pour mesurer cet impact.'
+              : 'Associe un modèle avec le sélecteur, puis collecte deux snapshots autour de la publication.'}
         </p>
+        {selectedArticle && !linkedModelId ? (
+          <div className="mt-2 rounded border border-violet-300/20 bg-violet-500/10 p-3 text-xs text-violet-100">
+            Sélectionne le modèle lié à cet article dans la liste à droite. L'impact 72 h apparaîtra
+            dès que l'historique contient un point avant et un point après publication.
+          </div>
+        ) : null}
         <div className="mt-3">
           <TimeSeriesChart data={impactChartData} />
         </div>

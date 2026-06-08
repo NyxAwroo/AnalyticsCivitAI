@@ -5,6 +5,7 @@ import {
   trackCompetitorByModelId
 } from '../storage/collect';
 import {
+  db,
   getCompetitorTrackedModels,
   getLatestModelSnapshots,
   getModelSnapshotsByModelIds,
@@ -15,6 +16,7 @@ import {
 import { calculateLatestDelta, hasSharpDownloadDrop } from '../utils/analytics';
 
 const COMPETITOR_ALERTED_MODEL_IDS_KEY = 'analytics-civitai-alerted-competitor-model-ids';
+const CONTEXT_MENU_ANALYTICS_ID = 'analytics-civitai-open-analytics';
 
 function isNumberArray(value: unknown): value is number[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'number');
@@ -64,6 +66,22 @@ async function scheduleAlarms(): Promise<void> {
   await chrome.alarms.clear(WEEKLY_SUMMARY_ALARM_NAME);
   await chrome.alarms.create(WEEKLY_SUMMARY_ALARM_NAME, {
     periodInMinutes: 7 * 24 * 60
+  });
+}
+
+function getModelIdFromUrl(url: string | undefined): number | undefined {
+  const match = url?.match(/civitai\.(?:com|red)\/models\/(\d+)/i);
+  return match ? Number(match[1]) : undefined;
+}
+
+function createContextMenus(): void {
+  chrome.contextMenus?.removeAll(() => {
+    chrome.contextMenus?.create({
+      id: CONTEXT_MENU_ANALYTICS_ID,
+      title: 'Voir analytics dans AnalyticsCivitAI',
+      contexts: ['page'],
+      documentUrlPatterns: ['https://civitai.com/models/*', 'https://civitai.red/models/*']
+    });
   });
 }
 
@@ -149,13 +167,27 @@ async function notifyNewCompetitorModels(): Promise<number> {
 }
 
 chrome.runtime.onInstalled.addListener(() => {
+  createContextMenus();
   void scheduleAlarms();
   void updateActionBadge();
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  createContextMenus();
   void scheduleAlarms();
   void updateActionBadge();
+});
+
+chrome.contextMenus?.onClicked.addListener((info, tab) => {
+  if (info.menuItemId !== CONTEXT_MENU_ANALYTICS_ID) {
+    return;
+  }
+
+  const modelId = getModelIdFromUrl(info.pageUrl ?? tab?.url);
+  const url = chrome.runtime.getURL(
+    `analytics.html?tab=competitors${modelId ? `&modelId=${modelId}` : ''}`
+  );
+  void chrome.tabs.create({ url });
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -219,6 +251,34 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
       .catch((error: unknown) => {
         sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
       });
+    return true;
+  }
+
+  if (
+    typeof message === 'object' &&
+    message !== null &&
+    'type' in message &&
+    message.type === 'CLEAR_ALERT_BADGE'
+  ) {
+    void chrome.action
+      .setBadgeText({ text: '' })
+      .then(() => sendResponse({ ok: true }))
+      .catch((error: unknown) => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+
+  if (
+    typeof message === 'object' &&
+    message !== null &&
+    'type' in message &&
+    message.type === 'IS_MODEL_TRACKED' &&
+    'modelId' in message &&
+    typeof message.modelId === 'number'
+  ) {
+    void db.trackedModels
+      .get(message.modelId)
+      .then((model) => sendResponse({ ok: true, tracked: Boolean(model) }))
+      .catch((error: unknown) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }
 

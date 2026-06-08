@@ -1,3 +1,4 @@
+import { RefreshCw, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import TimeSeriesChart, {
@@ -10,10 +11,12 @@ import {
   getModelVersionSnapshots,
   getOwnTrackedModels,
   getTrackedModelVersions,
+  updateTrackedModelNotes,
   type ModelSnapshot,
   type TrackedModel,
   type TrackedModelVersion
 } from '../../storage/db';
+import { collectSingleModel } from '../../storage/collect';
 import {
   calculateDeltaForPeriod,
   calculateEngagementRate,
@@ -40,6 +43,9 @@ const periods: Array<{ label: string; value: PeriodFilter }> = [
 ];
 
 const comparisonColors = ['#A78BFA', '#38BDF8', '#34D399', '#FBBF24', '#FB7185'];
+const pageSize = 10;
+
+type ModelSort = 'downloads' | 'velocity' | 'health' | 'name';
 
 interface VersionRoiSummary {
   versionId: number;
@@ -185,26 +191,68 @@ function toVersionRoiData(
 export default function Models(): JSX.Element {
   const [models, setModels] = useState<TrackedModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<number | undefined>();
-  const [period, setPeriod] = useState<PeriodFilter>(30);
+  const [period, setPeriod] = useState<PeriodFilter>(() => {
+    const stored = sessionStorage.getItem('analytics-civitai-model-period');
+    return stored === '7' || stored === '30' || stored === '90'
+      ? (Number(stored) as PeriodFilter)
+      : stored === 'all'
+        ? 'all'
+        : 30;
+  });
   const [snapshots, setSnapshots] = useState<ModelSnapshot[]>([]);
   const [histories, setHistories] = useState<Map<number, ModelSnapshot[]>>(new Map());
   const [versions, setVersions] = useState<TrackedModelVersion[]>([]);
   const [versionSnapshots, setVersionSnapshots] = useState<Map<number, ModelSnapshot[]>>(new Map());
+  const [filterText, setFilterText] = useState('');
+  const [sortBy, setSortBy] = useState<ModelSort>('downloads');
+  const [page, setPage] = useState(1);
+  const [refreshingModelId, setRefreshingModelId] = useState<number | undefined>();
+  const [message, setMessage] = useState('');
+
+  async function loadModels(preserveSelection = true): Promise<void> {
+    const trackedModels = await getOwnTrackedModels();
+    const trackedHistories = await getModelSnapshotsByModelIds(
+      trackedModels.map((model) => model.modelId)
+    );
+
+    setModels(trackedModels);
+    setHistories(trackedHistories);
+    setSelectedModelId((current) =>
+      preserveSelection && current ? current : trackedModels[0]?.modelId
+    );
+  }
 
   useEffect(() => {
-    async function loadModels(): Promise<void> {
-      const trackedModels = await getOwnTrackedModels();
-      const trackedHistories = await getModelSnapshotsByModelIds(
-        trackedModels.map((model) => model.modelId)
-      );
+    void loadModels(false);
+  }, []);
 
-      setModels(trackedModels);
-      setHistories(trackedHistories);
-      setSelectedModelId(trackedModels[0]?.modelId);
+  useEffect(() => {
+    sessionStorage.setItem('analytics-civitai-model-period', String(period));
+  }, [period]);
+
+  useEffect(() => {
+    function handleArrowNavigation(event: KeyboardEvent): void {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) {
+        return;
+      }
+
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+        return;
+      }
+
+      const currentIndex = models.findIndex((model) => model.modelId === selectedModelId);
+      if (currentIndex < 0) {
+        return;
+      }
+
+      const offset = event.key === 'ArrowRight' ? 1 : -1;
+      const nextModel = models[(currentIndex + offset + models.length) % models.length];
+      setSelectedModelId(nextModel?.modelId);
     }
 
-    void loadModels();
-  }, []);
+    window.addEventListener('keydown', handleArrowNavigation);
+    return () => window.removeEventListener('keydown', handleArrowNavigation);
+  }, [models, selectedModelId]);
 
   useEffect(() => {
     async function loadSnapshots(): Promise<void> {
@@ -264,6 +312,55 @@ export default function Models(): JSX.Element {
     () => toVersionRoiData(versions, versionSnapshots),
     [versionSnapshots, versions]
   );
+  const sortedModels = useMemo(() => {
+    return models
+      .filter((model) => {
+        const haystack = `${model.name} ${model.type} ${model.baseModel} ${model.tags.join(' ')}`.toLowerCase();
+        return haystack.includes(filterText.trim().toLowerCase());
+      })
+      .sort((a, b) => {
+        const historyA = histories.get(a.modelId) ?? [];
+        const historyB = histories.get(b.modelId) ?? [];
+
+        if (sortBy === 'name') {
+          return a.name.localeCompare(b.name);
+        }
+
+        if (sortBy === 'health') {
+          return calculateHealthScore(historyB) - calculateHealthScore(historyA);
+        }
+
+        if (sortBy === 'velocity') {
+          return calculateVelocity(historyB).downloadsPerDay - calculateVelocity(historyA).downloadsPerDay;
+        }
+
+        return (getLatestSnapshot(historyB)?.downloads ?? 0) - (getLatestSnapshot(historyA)?.downloads ?? 0);
+      });
+  }, [filterText, histories, models, sortBy]);
+  const pagedModels = sortedModels.slice((page - 1) * pageSize, page * pageSize);
+  const totalPages = Math.max(1, Math.ceil(sortedModels.length / pageSize));
+
+  async function handleRefreshModel(modelId: number): Promise<void> {
+    setRefreshingModelId(modelId);
+    setMessage('');
+
+    try {
+      await collectSingleModel(modelId);
+      await loadModels(true);
+      setMessage('Snapshot modèle ajouté.');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Snapshot impossible.');
+    } finally {
+      setRefreshingModelId(undefined);
+    }
+  }
+
+  async function handleNotesChange(modelId: number, notes: string): Promise<void> {
+    setModels((currentModels) =>
+      currentModels.map((model) => (model.modelId === modelId ? { ...model, notes } : model))
+    );
+    await updateTrackedModelNotes(modelId, notes);
+  }
 
   return (
     <div className="space-y-4 p-4">
@@ -307,6 +404,31 @@ export default function Models(): JSX.Element {
         })}
       </div>
 
+      <div className="grid grid-cols-[1fr_auto] gap-2 rounded border border-white/10 bg-gray-800 p-3">
+        <label className="flex h-9 items-center gap-2 rounded border border-white/10 bg-gray-950 px-3">
+          <Search className="h-4 w-4 text-violet-300" />
+          <input
+            value={filterText}
+            onChange={(event) => {
+              setFilterText(event.target.value);
+              setPage(1);
+            }}
+            placeholder="Filtrer les modèles"
+            className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-gray-500"
+          />
+        </label>
+        <select
+          value={sortBy}
+          onChange={(event) => setSortBy(event.target.value as ModelSort)}
+          className="h-9 rounded border border-white/10 bg-gray-950 px-2 text-xs text-white"
+        >
+          <option value="downloads">Downloads ↓</option>
+          <option value="velocity">Vélocité ↓</option>
+          <option value="health">Score santé ↓</option>
+          <option value="name">Nom A-Z</option>
+        </select>
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded border border-white/10 bg-gray-800 p-3">
           <p className="text-xs text-gray-400">Score santé</p>
@@ -347,6 +469,12 @@ export default function Models(): JSX.Element {
           <p className="text-xs text-gray-400">Longévité</p>
           <p className="mt-1 text-xl font-semibold text-white">{longevityScore}</p>
         </div>
+        <div className="rounded border border-white/10 bg-gray-800 p-3">
+          <p className="text-xs text-gray-400">Générations</p>
+          <p className="mt-1 text-xl font-semibold text-white">
+            {(latestSnapshot?.generationCount ?? 0).toLocaleString('fr-FR')}
+          </p>
+        </div>
       </div>
 
       <div className="rounded border border-white/10 bg-gray-800 p-3">
@@ -374,6 +502,73 @@ export default function Models(): JSX.Element {
           </div>
         ) : null}
       </div>
+
+      <section className="overflow-hidden rounded border border-white/10 bg-gray-800">
+        <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+          <p className="text-sm font-medium text-white">Liste modèles</p>
+          <p className="text-xs text-gray-400">
+            Page {page}/{totalPages}
+          </p>
+        </div>
+        {pagedModels.map((model) => {
+          const history = histories.get(model.modelId) ?? [];
+          const latest = getLatestSnapshot(history);
+          const velocitySummary = calculateVelocity(history);
+
+          return (
+            <div key={model.modelId} className="border-b border-white/10 p-3 last:border-b-0">
+              <div className="grid grid-cols-[1fr_auto] gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSelectedModelId(model.modelId)}
+                  className="min-w-0 text-left"
+                >
+                  <p className="truncate text-sm font-medium text-white">{model.name}</p>
+                  <p className="text-xs text-gray-400">
+                    {model.type} · {model.baseModel} · {(latest?.downloads ?? 0).toLocaleString('fr-FR')} DL ·{' '}
+                    {velocitySummary.downloadsPerDay.toFixed(1)}/j
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRefreshModel(model.modelId)}
+                  disabled={refreshingModelId === model.modelId}
+                  title="Snapshot on-demand"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded border border-white/10 text-gray-300 transition hover:bg-white/5 disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-4 w-4 ${refreshingModelId === model.modelId ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+              <textarea
+                value={model.notes ?? ''}
+                onChange={(event) => void handleNotesChange(model.modelId, event.target.value)}
+                placeholder="Note personnelle"
+                className="mt-2 min-h-16 w-full resize-y rounded border border-white/10 bg-gray-950 px-3 py-2 text-xs text-white placeholder:text-gray-500"
+              />
+            </div>
+          );
+        })}
+        <div className="grid grid-cols-2 gap-2 border-t border-white/10 p-2">
+          <button
+            type="button"
+            onClick={() => setPage((current) => Math.max(1, current - 1))}
+            disabled={page <= 1}
+            className="h-8 rounded border border-white/10 text-xs text-gray-200 disabled:opacity-50"
+          >
+            Précédent
+          </button>
+          <button
+            type="button"
+            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+            disabled={page >= totalPages}
+            className="h-8 rounded border border-white/10 text-xs text-gray-200 disabled:opacity-50"
+          >
+            Suivant
+          </button>
+        </div>
+      </section>
+
+      {message ? <p className="text-xs text-gray-400">{message}</p> : null}
 
       <div className="rounded border border-white/10 bg-gray-800 p-3">
         <div className="mb-3">

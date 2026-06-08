@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 
 import { I18nProvider } from '../i18n/I18nProvider';
+import { getSettings } from '../storage/db';
 import './styles.css';
 
 function escapeHtml(value: string): string {
@@ -37,10 +38,14 @@ async function bootstrap(): Promise<void> {
       throw new Error('Element #root introuvable.');
     }
 
-    const { default: App } = await import('./App');
+    const [settings, module] = await Promise.all([getSettings(), import('./App')]);
+    document.documentElement.classList.toggle('theme-light', !settings.darkMode);
+    document.body.classList.toggle('theme-light', !settings.darkMode);
+    const isFullPage = window.location.pathname.endsWith('/analytics.html');
+    const { default: App } = module;
     createRoot(root).render(
       <I18nProvider>
-        <App />
+        <App isFullPage={isFullPage} />
       </I18nProvider>
     );
   } catch (error) {

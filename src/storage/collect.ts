@@ -1,5 +1,6 @@
 import {
   CivitAIError,
+  fetchFavoriteModels,
   fetchModelDetails,
   fetchUserArticles,
   fetchUserModels,
@@ -18,12 +19,14 @@ import {
   type TrackedModel,
   type TrackedModelVersion
 } from './db';
+import { COLLECTION_PROGRESS_KEY } from '../utils/constants';
 
 export interface CollectionResult {
   models: number;
   competitors: number;
   articles: number;
   snapshots: number;
+  errors: number;
   collectedAt: number;
 }
 
@@ -32,6 +35,14 @@ export interface CompetitorNewModelAlert {
   name: string;
   creatorUsername: string;
   matchedTags: string[];
+}
+
+export interface CollectionProgress {
+  isCollecting: boolean;
+  current: number;
+  total: number;
+  label: string;
+  startedAt: number;
 }
 
 function getBaseModel(model: CivitAIModel): string {
@@ -53,6 +64,34 @@ function toTrackedModel(model: CivitAIModel, isOwn: boolean, addedAt = Date.now(
     addedAt,
     creatorUsername: model.creator?.username
   };
+}
+
+function canUseChromeStorage(): boolean {
+  return typeof chrome !== 'undefined' && Boolean(chrome.storage?.local);
+}
+
+async function updateCollectionProgress(progress: CollectionProgress): Promise<void> {
+  if (!canUseChromeStorage()) {
+    return;
+  }
+
+  await chrome.storage.local.set({ [COLLECTION_PROGRESS_KEY]: progress });
+}
+
+async function clearCollectionProgress(): Promise<void> {
+  if (!canUseChromeStorage()) {
+    return;
+  }
+
+  await chrome.storage.local.set({
+    [COLLECTION_PROGRESS_KEY]: {
+      isCollecting: false,
+      current: 0,
+      total: 0,
+      label: '',
+      startedAt: 0
+    } satisfies CollectionProgress
+  });
 }
 
 function toTrackedModelVersions(model: CivitAIModel): TrackedModelVersion[] {
@@ -78,7 +117,8 @@ function toModelSnapshots(model: CivitAIModel, timestamp: number): ModelSnapshot
         comments: model.stats?.commentCount ?? 0,
         rating: model.stats?.rating ?? 0,
         ratingCount: model.stats?.ratingCount ?? 0,
-        buzzTipped: model.stats?.tippedAmountCount ?? 0
+        buzzTipped: model.stats?.tippedAmountCount ?? 0,
+        generationCount: model.stats?.generationCount ?? 0
       }
     ];
   }
@@ -92,7 +132,8 @@ function toModelSnapshots(model: CivitAIModel, timestamp: number): ModelSnapshot
     comments: model.stats?.commentCount ?? 0,
     rating: model.stats?.rating ?? 0,
     ratingCount: model.stats?.ratingCount ?? 0,
-    buzzTipped: model.stats?.tippedAmountCount ?? 0
+    buzzTipped: model.stats?.tippedAmountCount ?? 0,
+    generationCount: model.stats?.generationCount ?? 0
   }));
 }
 
@@ -123,7 +164,7 @@ function parseCivitAIModelId(input: string): number | undefined {
     return directId;
   }
 
-  const match = trimmedInput.match(/civitai\.com\/models\/(\d+)/i);
+  const match = trimmedInput.match(/civitai\.(?:com|red)\/models\/(\d+)/i);
   if (!match) {
     return undefined;
   }
@@ -137,12 +178,13 @@ function getSourceModelId(model: CivitAIModel | TrackedModel): number {
 
 async function fetchModelWithFallback(
   apiKey: string,
-  model: CivitAIModel | TrackedModel
+  model: CivitAIModel | TrackedModel,
+  apiBaseUrl: string
 ): Promise<CivitAIModel | undefined> {
   const modelId = getSourceModelId(model);
 
   try {
-    return await fetchModelDetails(apiKey, modelId);
+    return await fetchModelDetails(apiKey, modelId, apiBaseUrl);
   } catch (error) {
     if (error instanceof CivitAIError) {
       console.warn(
@@ -169,25 +211,65 @@ export async function collectNow(): Promise<CollectionResult> {
   }
 
   const collectedAt = Date.now();
+  let lastCollectionErrors = 0;
+  const startedAt = collectedAt;
 
   // ─── 1. Fetch des modèles ────────────────────────────────────────────────────
-  const modelsResponse = await fetchUserModels(settings.apiKey, settings.username);
+  const modelsResponse = await fetchUserModels(
+    settings.apiKey,
+    settings.username,
+    settings.apiBaseUrl
+  );
   const detailedModels: CivitAIModel[] = [];
+  const competitorModels = await getCompetitorTrackedModels();
+  const totalItems = modelsResponse.items.length + competitorModels.length + 1;
+  let currentItem = 0;
+
+  await updateCollectionProgress({
+    isCollecting: true,
+    current: currentItem,
+    total: totalItems,
+    label: 'Préparation',
+    startedAt
+  });
 
   for (const model of modelsResponse.items) {
-    const detailedModel = await fetchModelWithFallback(settings.apiKey, model);
+    currentItem += 1;
+    await updateCollectionProgress({
+      isCollecting: true,
+      current: currentItem,
+      total: totalItems,
+      label: model.name,
+      startedAt
+    });
+    const detailedModel = await fetchModelWithFallback(settings.apiKey, model, settings.apiBaseUrl);
     if (detailedModel) {
       detailedModels.push(detailedModel);
+    } else {
+      lastCollectionErrors += 1;
     }
   }
 
-  const competitorModels = await getCompetitorTrackedModels();
   const detailedCompetitors: Array<{ model: CivitAIModel; addedAt: number }> = [];
 
   for (const competitor of competitorModels) {
-    const detailedCompetitor = await fetchModelWithFallback(settings.apiKey, competitor);
+    currentItem += 1;
+    await updateCollectionProgress({
+      isCollecting: true,
+      current: currentItem,
+      total: totalItems,
+      label: competitor.name,
+      startedAt
+    });
+    const detailedCompetitor = await fetchModelWithFallback(
+      settings.apiKey,
+      competitor,
+      settings.apiBaseUrl
+    );
     if (detailedCompetitor) {
       detailedCompetitors.push({ model: detailedCompetitor, addedAt: competitor.addedAt });
+    } else {
+      lastCollectionErrors += 1;
     }
   }
 
@@ -195,11 +277,24 @@ export async function collectNow(): Promise<CollectionResult> {
   let articles: CivitAIArticle[] = [];
 
   try {
-    const articlesResponse = await fetchUserArticles(settings.apiKey, settings.username);
+    currentItem += 1;
+    await updateCollectionProgress({
+      isCollecting: true,
+      current: currentItem,
+      total: totalItems,
+      label: 'Articles',
+      startedAt
+    });
+    const articlesResponse = await fetchUserArticles(
+      settings.apiKey,
+      settings.username,
+      settings.apiBaseUrl
+    );
     articles = articlesResponse.items;
   } catch (error) {
     if (error instanceof CivitAIError) {
       console.warn(`CivitAI articles error ${error.status ?? 'unknown'}; skipping articles.`, error);
+      lastCollectionErrors += 1;
     } else {
       throw error;
     }
@@ -210,6 +305,13 @@ export async function collectNow(): Promise<CollectionResult> {
     ...detailedModels.map((model) => toTrackedModel(model, true)),
     ...detailedCompetitors.map(({ model, addedAt }) => toTrackedModel(model, false, addedAt))
   ];
+  const existingTrackedModels = new Map(
+    (await db.trackedModels.toArray()).map((model) => [model.modelId, model])
+  );
+  const trackedModelsWithNotes = trackedModels.map((model) => ({
+    ...model,
+    notes: existingTrackedModels.get(model.modelId)?.notes
+  }));
   const allDetailedModels = [
     ...detailedModels,
     ...detailedCompetitors.map((competitor) => competitor.model)
@@ -233,7 +335,7 @@ export async function collectNow(): Promise<CollectionResult> {
   // Chaque bulk operation de Dexie est atomique individuellement : c'est suffisant
   // pour notre cas d'usage (pas besoin de rollback multi-table).
   // ────────────────────────────────────────────────────────────────────────────
-  await db.trackedModels.bulkPut(trackedModels);
+  await db.trackedModels.bulkPut(trackedModelsWithNotes);
   if (trackedModelVersions.length > 0) {
     await db.trackedModelVersions.bulkPut(trackedModelVersions);
   }
@@ -243,19 +345,68 @@ export async function collectNow(): Promise<CollectionResult> {
 
   // ─── 5. Mise à jour des settings (lastCollectedAt) ──────────────────────────
   // saveSettings gère IndexedDB + chrome.storage — hors transaction, aucun risque.
-  const updatedSettings = { ...settings, lastCollectedAt: collectedAt };
+  const updatedSettings = { ...settings, lastCollectedAt: collectedAt, lastCollectionErrors };
   await saveSettings(updatedSettings);
 
   // ─── 6. Purge des anciens snapshots ─────────────────────────────────────────
   await purgeOldSnapshots(settings.snapshotRetentionDays);
+  await clearCollectionProgress();
 
   return {
     models: detailedModels.length,
     competitors: detailedCompetitors.length,
     articles: trackedArticles.length,
     snapshots: modelSnapshots.length + articleSnapshots.length,
+    errors: lastCollectionErrors,
     collectedAt
   };
+}
+
+export async function collectSingleModel(modelId: number): Promise<TrackedModel> {
+  const settings = await getSettings();
+  const existing = await db.trackedModels.get(modelId);
+
+  if (!settings.apiKey) {
+    throw new Error('Configure une clé API valide avant de lancer la collecte.');
+  }
+
+  const model = await fetchModelDetails(settings.apiKey, modelId, settings.apiBaseUrl);
+  const collectedAt = Date.now();
+  const trackedModel = {
+    ...toTrackedModel(model, existing?.isOwn ?? true, existing?.addedAt ?? Date.now()),
+    notes: existing?.notes
+  };
+  const trackedModelVersions = toTrackedModelVersions(model);
+  const modelSnapshots = toModelSnapshots(model, collectedAt);
+
+  await db.trackedModels.put(trackedModel);
+  if (trackedModelVersions.length > 0) {
+    await db.trackedModelVersions.bulkPut(trackedModelVersions);
+  }
+  await db.modelSnapshots.bulkAdd(modelSnapshots);
+
+  return trackedModel;
+}
+
+export async function importFavoriteModels(): Promise<TrackedModel[]> {
+  const settings = await getSettings();
+
+  if (!settings.apiKey) {
+    throw new Error('Configure une clé API valide avant d’importer les favoris.');
+  }
+
+  const response = await fetchFavoriteModels(settings.apiKey, settings.apiBaseUrl);
+  const existing = new Map((await db.trackedModels.toArray()).map((model) => [model.modelId, model]));
+  const trackedModels = response.items.map((model) => ({
+    ...toTrackedModel(model, false, existing.get(model.id)?.addedAt ?? Date.now()),
+    notes: existing.get(model.id)?.notes
+  }));
+
+  if (trackedModels.length > 0) {
+    await db.trackedModels.bulkPut(trackedModels);
+  }
+
+  return trackedModels;
 }
 
 export async function trackCompetitorFromInput(input: string): Promise<TrackedModel> {
@@ -266,7 +417,7 @@ export async function trackCompetitorFromInput(input: string): Promise<TrackedMo
     throw new Error('URL CivitAI invalide. Format attendu : https://civitai.com/models/123/...');
   }
 
-  const model = await fetchModelDetails(settings.apiKey, modelId);
+  const model = await fetchModelDetails(settings.apiKey, modelId, settings.apiBaseUrl);
   const collectedAt = Date.now();
   const trackedModel = toTrackedModel(model, false);
   const trackedModelVersions = toTrackedModelVersions(model);
@@ -310,7 +461,11 @@ export async function findNewCompetitorModelsInOwnedNiches(): Promise<Competitor
   }
 
   for (const creatorUsername of competitorCreators) {
-    const response = await fetchUserModels(settings.apiKey, creatorUsername);
+    const response = await fetchUserModels(
+      settings.apiKey,
+      creatorUsername,
+      settings.apiBaseUrl
+    );
 
     for (const model of response.items) {
       if (knownModelIds.has(model.id)) {
@@ -348,7 +503,8 @@ export function getModelAggregateSnapshot(
       comments: Math.max(total.comments, snapshot.comments),
       rating: Math.max(total.rating, snapshot.rating),
       ratingCount: Math.max(total.ratingCount, snapshot.ratingCount),
-      buzzTipped: Math.max(total.buzzTipped ?? 0, snapshot.buzzTipped ?? 0)
+      buzzTipped: Math.max(total.buzzTipped ?? 0, snapshot.buzzTipped ?? 0),
+      generationCount: Math.max(total.generationCount ?? 0, snapshot.generationCount ?? 0)
     }),
     {
       modelId,
@@ -358,7 +514,8 @@ export function getModelAggregateSnapshot(
       comments: 0,
       rating: 0,
       ratingCount: 0,
-      buzzTipped: 0
+      buzzTipped: 0,
+      generationCount: 0
     }
   );
 }

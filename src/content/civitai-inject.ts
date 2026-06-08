@@ -63,6 +63,26 @@ function createFollowButton(modelId: number): HTMLButtonElement {
   return button;
 }
 
+function refreshTrackedState(button: HTMLButtonElement, modelId: number): void {
+  chrome.runtime.sendMessage(
+    {
+      type: 'IS_MODEL_TRACKED',
+      modelId
+    },
+    (response: unknown) => {
+      if (chrome.runtime.lastError) {
+        return;
+      }
+
+      const result = response as { ok?: boolean; tracked?: boolean };
+      if (result.ok && result.tracked) {
+        setButtonState(button, '✓ Déjà suivi', true);
+        button.title = 'Ce modèle est déjà suivi dans AnalyticsCivitAI';
+      }
+    }
+  );
+}
+
 function renderFollowButton(): void {
   const modelId = getCurrentModelId();
   const existingButton = document.getElementById(BUTTON_ID);
@@ -76,7 +96,9 @@ function renderFollowButton(): void {
     return;
   }
 
-  document.body.append(createFollowButton(modelId));
+  const button = createFollowButton(modelId);
+  document.body.append(button);
+  refreshTrackedState(button, modelId);
 }
 
 let currentPath = window.location.pathname;

@@ -1,14 +1,20 @@
-import { CheckCircle2, Download, FileJson, KeyRound, Save, ShieldAlert, Upload } from 'lucide-react';
+import { CheckCircle2, Download, FileJson, KeyRound, Printer, Save, ShieldAlert, Upload } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { validateApiKey } from '../../api/civitai';
-import { getSettings, saveSettings, type Settings as StoredSettings } from '../../storage/db';
+import {
+  getSettings,
+  saveSettings,
+  type AccountProfile,
+  type Settings as StoredSettings
+} from '../../storage/db';
 import {
   exportAllDataAsJson,
   exportModelSnapshotsAsCsv,
   importAllDataFromJsonFile
 } from '../../storage/export';
 import { useI18n } from '../../i18n/I18nProvider';
+import { CIVITAI_API_BASE_URL, CIVITAI_RED_API_BASE_URL } from '../../utils/constants';
 
 type SaveState = 'idle' | 'saving' | 'success' | 'error';
 
@@ -18,6 +24,8 @@ export default function Settings(): JSX.Element {
   const [status, setStatus] = useState<SaveState>('idle');
   const [message, setMessage] = useState('');
   const [importMessage, setImportMessage] = useState('');
+  const [pendingImportFile, setPendingImportFile] = useState<File | undefined>();
+  const [profileLabel, setProfileLabel] = useState('');
   const importInputRef = useRef<HTMLInputElement>(null);
   const languageInputRef = useRef<HTMLInputElement>(null);
   const { language, setLanguage, importTranslations, exportTemplate, t } = useI18n();
@@ -27,9 +35,21 @@ export default function Settings(): JSX.Element {
       const stored = await getSettings();
       setSettings(stored);
       setApiKey(stored.apiKey);
+      setProfileLabel(stored.username || 'Compte CivitAI');
     }
 
     void loadSettings();
+  }, []);
+
+  useEffect(() => {
+    function handleEscape(event: KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        cancelImport();
+      }
+    }
+
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
   }, []);
 
   async function rescheduleCollection(): Promise<void> {
@@ -45,7 +65,7 @@ export default function Settings(): JSX.Element {
     setMessage('');
 
     try {
-      const user = await validateApiKey(apiKey);
+      const user = await validateApiKey(apiKey, settings.apiBaseUrl);
       const nextSettings: StoredSettings = {
         ...settings,
         apiKey: apiKey.trim(),
@@ -79,6 +99,78 @@ export default function Settings(): JSX.Element {
     setSettings(nextSettings);
   }
 
+  async function handleApiBaseUrlChange(apiBaseUrl: string): Promise<void> {
+    if (!settings) {
+      return;
+    }
+
+    const nextSettings: StoredSettings = {
+      ...settings,
+      apiBaseUrl
+    };
+
+    await saveSettings(nextSettings);
+    setSettings(nextSettings);
+  }
+
+  async function handleSaveProfile(): Promise<void> {
+    if (!settings || !apiKey.trim() || !settings.username) {
+      setMessage('Valide une clé API avant d’enregistrer un profil.');
+      setStatus('error');
+      return;
+    }
+
+    const profile: AccountProfile = {
+      id: crypto.randomUUID(),
+      label: profileLabel.trim() || settings.username,
+      apiKey: apiKey.trim(),
+      username: settings.username,
+      apiBaseUrl: settings.apiBaseUrl
+    };
+    const nextSettings: StoredSettings = {
+      ...settings,
+      accountProfiles: [...settings.accountProfiles, profile],
+      activeProfileId: profile.id
+    };
+
+    await saveSettings(nextSettings);
+    setSettings(nextSettings);
+    setMessage(`Profil "${profile.label}" enregistré.`);
+    setStatus('success');
+  }
+
+  async function handleProfileChange(profileId: string): Promise<void> {
+    if (!settings) {
+      return;
+    }
+
+    const profile = settings.accountProfiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      return;
+    }
+
+    const nextSettings: StoredSettings = {
+      ...settings,
+      apiKey: profile.apiKey,
+      username: profile.username,
+      apiBaseUrl: profile.apiBaseUrl,
+      activeProfileId: profile.id
+    };
+
+    await saveSettings(nextSettings);
+    await rescheduleCollection();
+    setSettings(nextSettings);
+    setApiKey(profile.apiKey);
+    setProfileLabel(profile.label);
+    setMessage(`Profil actif : ${profile.label}.`);
+    setStatus('success');
+  }
+
+  function openMonthlyReport(): void {
+    const url = chrome.runtime.getURL('analytics.html?tab=dashboard&print=month');
+    void chrome.tabs.create({ url });
+  }
+
   async function handleRetentionChange(value: number): Promise<void> {
     if (!settings) {
       return;
@@ -104,16 +196,29 @@ export default function Settings(): JSX.Element {
     };
 
     await saveSettings(nextSettings);
+    document.documentElement.classList.toggle('theme-light', !darkMode);
+    document.body.classList.toggle('theme-light', !darkMode);
     setSettings(nextSettings);
   }
 
-  async function handleImport(file: File | undefined): Promise<void> {
+  function handleImportSelection(file: File | undefined): void {
     if (!file) {
       return;
     }
 
+    setPendingImportFile(file);
+    setImportMessage('');
+  }
+
+  async function confirmImport(): Promise<void> {
+    if (!pendingImportFile) {
+      return;
+    }
+
     try {
-      const summary = await importAllDataFromJsonFile(file);
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await exportAllDataAsJson(`analytics-civitai-backup-before-import-${stamp}.json`);
+      const summary = await importAllDataFromJsonFile(pendingImportFile);
       const stored = await getSettings();
       setSettings(stored);
       setApiKey(stored.apiKey);
@@ -123,9 +228,17 @@ export default function Settings(): JSX.Element {
     } catch (error) {
       setImportMessage(error instanceof Error ? error.message : 'Import impossible.');
     } finally {
+      setPendingImportFile(undefined);
       if (importInputRef.current) {
         importInputRef.current.value = '';
       }
+    }
+  }
+
+  function cancelImport(): void {
+    setPendingImportFile(undefined);
+    if (importInputRef.current) {
+      importInputRef.current.value = '';
     }
   }
 
@@ -167,6 +280,19 @@ export default function Settings(): JSX.Element {
           className="h-10 w-full rounded border border-white/10 bg-gray-950 px-3 text-sm text-white placeholder:text-gray-500"
         />
 
+        <label htmlFor="api-base-url" className="mt-3 block text-xs font-medium text-gray-300">
+          Instance CivitAI
+        </label>
+        <select
+          id="api-base-url"
+          value={settings?.apiBaseUrl ?? CIVITAI_API_BASE_URL}
+          onChange={(event) => void handleApiBaseUrlChange(event.target.value)}
+          className="mt-2 h-10 w-full rounded border border-white/10 bg-gray-950 px-3 text-sm text-white"
+        >
+          <option value={CIVITAI_API_BASE_URL}>civitai.com</option>
+          <option value={CIVITAI_RED_API_BASE_URL}>civitai.red</option>
+        </select>
+
         <button
           type="button"
           onClick={handleSave}
@@ -176,6 +302,40 @@ export default function Settings(): JSX.Element {
           <Save className="h-4 w-4" />
           {status === 'saving' ? 'Validation' : 'Valider'}
         </button>
+
+        <div className="mt-3 rounded border border-white/10 bg-gray-900/70 p-3">
+          <label htmlFor="profile-switch" className="text-xs font-medium text-gray-300">
+            Profils API
+          </label>
+          <select
+            id="profile-switch"
+            value={settings?.activeProfileId ?? ''}
+            onChange={(event) => void handleProfileChange(event.target.value)}
+            className="mt-2 h-9 w-full rounded border border-white/10 bg-gray-950 px-2 text-xs text-white"
+          >
+            <option value="">Compte courant</option>
+            {(settings?.accountProfiles ?? []).map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.label} · {profile.username}
+              </option>
+            ))}
+          </select>
+          <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+            <input
+              value={profileLabel}
+              onChange={(event) => setProfileLabel(event.target.value)}
+              placeholder="Nom du profil"
+              className="h-9 rounded border border-white/10 bg-gray-950 px-2 text-xs text-white placeholder:text-gray-500"
+            />
+            <button
+              type="button"
+              onClick={() => void handleSaveProfile()}
+              className="inline-flex h-9 items-center justify-center rounded border border-white/10 px-3 text-xs font-semibold text-gray-200 transition hover:bg-white/5"
+            >
+              Enregistrer
+            </button>
+          </div>
+        </div>
 
         {message ? (
           <div
@@ -300,11 +460,19 @@ export default function Settings(): JSX.Element {
             JSON
           </button>
         </div>
+        <button
+          type="button"
+          onClick={openMonthlyReport}
+          className="mt-2 inline-flex h-9 w-full items-center justify-center gap-2 rounded border border-white/10 px-3 text-xs font-semibold text-gray-200 transition hover:bg-white/5"
+        >
+          <Printer className="h-4 w-4" />
+          Rapport PDF mensuel
+        </button>
         <input
           ref={importInputRef}
           type="file"
           accept="application/json,.json"
-          onChange={(event) => void handleImport(event.target.files?.[0])}
+          onChange={(event) => handleImportSelection(event.target.files?.[0])}
           className="hidden"
         />
         <button
@@ -317,6 +485,38 @@ export default function Settings(): JSX.Element {
         </button>
         {importMessage ? <p className="mt-2 text-xs text-gray-400">{importMessage}</p> : null}
       </section>
+
+      {pendingImportFile ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-sm rounded border border-amber-300/30 bg-gray-900 p-4 shadow-xl">
+            <div className="flex items-center gap-2 text-amber-100">
+              <ShieldAlert className="h-4 w-4 shrink-0" />
+              <p className="text-sm font-semibold">Confirmer l'import JSON</p>
+            </div>
+            <p className="mt-2 text-sm text-gray-300">
+              Les données locales seront remplacées. Une sauvegarde JSON horodatée sera téléchargée
+              automatiquement avant l'import.
+            </p>
+            <p className="mt-2 truncate text-xs text-gray-500">{pendingImportFile.name}</p>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={cancelImport}
+                className="inline-flex h-9 items-center justify-center rounded border border-white/10 px-3 text-xs font-semibold text-gray-200 transition hover:bg-white/5"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmImport()}
+                className="inline-flex h-9 items-center justify-center rounded bg-amber-500 px-3 text-xs font-semibold text-gray-950 transition hover:bg-amber-400"
+              >
+                Sauvegarder et importer
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <section className="rounded border border-white/10 bg-gray-800 p-4 text-sm text-gray-300">
         <p>

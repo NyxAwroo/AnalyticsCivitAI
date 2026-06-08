@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie';
 
 import {
   DEFAULT_COLLECTION_FREQUENCY_HOURS,
+  CIVITAI_API_BASE_URL,
   SETTINGS_KEY,
   SNAPSHOT_RETENTION_DAYS
 } from '../utils/constants';
@@ -17,6 +18,7 @@ export interface ModelSnapshot {
   rating: number;
   ratingCount: number;
   buzzTipped?: number;
+  generationCount?: number;
 }
 
 export interface TrackedModel {
@@ -28,6 +30,15 @@ export interface TrackedModel {
   isOwn: boolean;
   addedAt: number;
   creatorUsername?: string;
+  notes?: string;
+}
+
+export interface AccountProfile {
+  id: string;
+  label: string;
+  apiKey: string;
+  username: string;
+  apiBaseUrl: string;
 }
 
 export interface TrackedModelVersion {
@@ -82,13 +93,17 @@ export interface TagSnapshot {
 export interface Settings {
   id: typeof SETTINGS_KEY;
   apiKey: string;
+  apiBaseUrl: string;
   username: string;
   collectFrequencyHours: 1 | 6 | 12 | 24;
   lastCollectedAt: number;
+  lastCollectionErrors: number;
   darkMode: boolean;
   snapshotRetentionDays: number;
   language: 'fr' | 'en' | 'custom';
   customTranslations: Record<string, string>;
+  accountProfiles: AccountProfile[];
+  activeProfileId: string;
 }
 
 export class AnalyticsCivitAIDatabase extends Dexie {
@@ -148,6 +163,16 @@ export class AnalyticsCivitAIDatabase extends Dexie {
       tagSnapshots: '++id, tag, timestamp, [tag+timestamp]',
       settings: 'id'
     });
+    this.version(6).stores({
+      modelSnapshots: '++id, modelId, versionId, timestamp, [modelId+timestamp]',
+      trackedModels: 'modelId, name, type, baseModel, isOwn, addedAt',
+      trackedModelVersions: 'versionId, modelId, name, baseModel, publishedAt',
+      articleSnapshots: '++id, articleId, timestamp, [articleId+timestamp]',
+      trackedArticles: 'articleId, title, publishedAt',
+      trendSnapshots: '++id, modelId, timestamp, type, baseModel, [modelId+timestamp]',
+      tagSnapshots: '++id, tag, timestamp, [tag+timestamp]',
+      settings: 'id'
+    });
   }
 }
 
@@ -156,13 +181,17 @@ export const db = new AnalyticsCivitAIDatabase();
 export const defaultSettings: Settings = {
   id: SETTINGS_KEY,
   apiKey: '',
+  apiBaseUrl: CIVITAI_API_BASE_URL,
   username: '',
   collectFrequencyHours: DEFAULT_COLLECTION_FREQUENCY_HOURS,
   lastCollectedAt: 0,
+  lastCollectionErrors: 0,
   darkMode: true,
   snapshotRetentionDays: SNAPSHOT_RETENTION_DAYS,
   language: 'fr',
-  customTranslations: {}
+  customTranslations: {},
+  accountProfiles: [],
+  activeProfileId: ''
 };
 
 function canUseChromeStorage(): boolean {
@@ -179,22 +208,53 @@ function isSettings(value: unknown): value is Settings {
   return (
     candidate.id === SETTINGS_KEY &&
     typeof candidate.apiKey === 'string' &&
+    typeof candidate.apiBaseUrl === 'string' &&
     typeof candidate.username === 'string' &&
     typeof candidate.collectFrequencyHours === 'number' &&
     typeof candidate.lastCollectedAt === 'number' &&
+    typeof candidate.lastCollectionErrors === 'number' &&
     typeof candidate.darkMode === 'boolean' &&
     typeof candidate.snapshotRetentionDays === 'number' &&
     (candidate.language === 'fr' || candidate.language === 'en' || candidate.language === 'custom') &&
     typeof candidate.customTranslations === 'object' &&
-    candidate.customTranslations !== null
+    candidate.customTranslations !== null &&
+    Array.isArray(candidate.accountProfiles) &&
+    typeof candidate.activeProfileId === 'string'
   );
 }
 
+function normalizeAccountProfiles(value: unknown): AccountProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((profile): profile is Partial<AccountProfile> => typeof profile === 'object' && profile !== null)
+    .map((profile) => ({
+      id: typeof profile.id === 'string' && profile.id.length > 0 ? profile.id : crypto.randomUUID(),
+      label: typeof profile.label === 'string' && profile.label.length > 0 ? profile.label : 'Compte',
+      apiKey: typeof profile.apiKey === 'string' ? profile.apiKey : '',
+      username: typeof profile.username === 'string' ? profile.username : '',
+      apiBaseUrl:
+        typeof profile.apiBaseUrl === 'string' && profile.apiBaseUrl.length > 0
+          ? profile.apiBaseUrl
+          : CIVITAI_API_BASE_URL
+    }));
+}
+
 function normalizeSettings(value: Partial<Settings> | undefined): Settings {
+  const accountProfiles = normalizeAccountProfiles(value?.accountProfiles);
+
   return {
     ...defaultSettings,
     ...value,
     id: SETTINGS_KEY,
+    apiBaseUrl:
+      typeof value?.apiBaseUrl === 'string' && value.apiBaseUrl.length > 0
+        ? value.apiBaseUrl
+        : defaultSettings.apiBaseUrl,
+    lastCollectionErrors:
+      typeof value?.lastCollectionErrors === 'number' ? value.lastCollectionErrors : 0,
     language:
       value?.language === 'en' || value?.language === 'custom' || value?.language === 'fr'
         ? value.language
@@ -202,7 +262,13 @@ function normalizeSettings(value: Partial<Settings> | undefined): Settings {
     customTranslations:
       typeof value?.customTranslations === 'object' && value.customTranslations !== null
         ? value.customTranslations
-        : {}
+        : {},
+    accountProfiles,
+    activeProfileId:
+      typeof value?.activeProfileId === 'string' &&
+      accountProfiles.some((profile) => profile.id === value.activeProfileId)
+        ? value.activeProfileId
+        : ''
   };
 }
 
@@ -251,8 +317,9 @@ export async function getSettings(): Promise<Settings> {
  * À appeler toujours HORS d'une transaction Dexie.
  */
 export async function saveSettings(settings: Settings): Promise<void> {
-  await db.settings.put(settings);
-  await writeSettingsToChromeStorage(settings);
+  const normalizedSettings = normalizeSettings(settings);
+  await db.settings.put(normalizedSettings);
+  await writeSettingsToChromeStorage(normalizedSettings);
 }
 
 export async function purgeOldSnapshots(retentionDays: number): Promise<void> {
@@ -279,6 +346,19 @@ export async function removeTrackedModel(modelId: number): Promise<void> {
   await db.modelSnapshots.where('modelId').equals(modelId).delete();
 }
 
+export async function updateTrackedModelNotes(modelId: number, notes: string): Promise<void> {
+  const model = await db.trackedModels.get(modelId);
+
+  if (!model) {
+    return;
+  }
+
+  await db.trackedModels.put({
+    ...model,
+    notes
+  });
+}
+
 function mergeSnapshotIntoModelTotal(
   existing: ModelSnapshot | undefined,
   snapshot: ModelSnapshot
@@ -295,7 +375,8 @@ function mergeSnapshotIntoModelTotal(
     comments: Math.max(existing.comments, snapshot.comments),
     rating: Math.max(existing.rating, snapshot.rating),
     ratingCount: Math.max(existing.ratingCount, snapshot.ratingCount),
-    buzzTipped: Math.max(existing.buzzTipped ?? 0, snapshot.buzzTipped ?? 0)
+    buzzTipped: Math.max(existing.buzzTipped ?? 0, snapshot.buzzTipped ?? 0),
+    generationCount: Math.max(existing.generationCount ?? 0, snapshot.generationCount ?? 0)
   };
 }
 

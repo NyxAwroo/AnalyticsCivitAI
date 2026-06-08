@@ -14,6 +14,7 @@ export interface CivitAIModelStats {
   rating?: number;
   ratingCount?: number;
   tippedAmountCount?: number;
+  generationCount?: number;
 }
 
 export interface CivitAIModelVersion {
@@ -163,8 +164,13 @@ async function fetchWithRetry(
 
 // ─── Requête principale ───────────────────────────────────────────────────────
 
-async function request<T>(path: string, apiKey: string, params?: URLSearchParams): Promise<T> {
-  const url = new URL(`${CIVITAI_API_BASE_URL}${path}`);
+async function request<T>(
+  path: string,
+  apiKey: string,
+  params?: URLSearchParams,
+  apiBaseUrl = CIVITAI_API_BASE_URL
+): Promise<T> {
+  const url = new URL(`${apiBaseUrl}${path}`);
 
   if (params) {
     params.forEach((value, key) => url.searchParams.set(key, value));
@@ -186,21 +192,26 @@ async function request<T>(path: string, apiKey: string, params?: URLSearchParams
 
 // ─── Endpoints publics ────────────────────────────────────────────────────────
 
-export async function validateApiKey(apiKey: string): Promise<CivitAIUser> {
-  return request<CivitAIUser>('/me', apiKey);
+export async function validateApiKey(
+  apiKey: string,
+  apiBaseUrl = CIVITAI_API_BASE_URL
+): Promise<CivitAIUser> {
+  return request<CivitAIUser>('/me', apiKey, undefined, apiBaseUrl);
 }
 
 export async function fetchUserModels(
   apiKey: string,
-  username: string
+  username: string,
+  apiBaseUrl = CIVITAI_API_BASE_URL
 ): Promise<CivitAIListResponse<CivitAIModel>> {
-  const params = new URLSearchParams({ username, limit: '100' });
-  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params);
+  const params = new URLSearchParams({ username, limit: '100', nsfw: 'true' });
+  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params, apiBaseUrl);
 }
 
 export async function searchModels(
   apiKey: string,
-  query: string
+  query: string,
+  apiBaseUrl = CIVITAI_API_BASE_URL
 ): Promise<CivitAIListResponse<CivitAIModel>> {
   const params = new URLSearchParams({
     query,
@@ -208,25 +219,44 @@ export async function searchModels(
     sort: 'Most Downloaded'
   });
 
-  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params);
+  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params, apiBaseUrl);
+}
+
+export async function fetchFavoriteModels(
+  apiKey: string,
+  apiBaseUrl = CIVITAI_API_BASE_URL
+): Promise<CivitAIListResponse<CivitAIModel>> {
+  const params = new URLSearchParams({
+    favorited: 'true',
+    limit: '100',
+    nsfw: 'true',
+    sort: 'Most Downloaded'
+  });
+
+  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params, apiBaseUrl);
 }
 
 /**
  * Détail d'un modèle avec délai de politesse AVANT l'appel.
  * Le délai est appliqué ici pour cadencer les appels en batch côté appelant.
  */
-export async function fetchModelDetails(apiKey: string, modelId: number): Promise<CivitAIModel> {
+export async function fetchModelDetails(
+  apiKey: string,
+  modelId: number,
+  apiBaseUrl = CIVITAI_API_BASE_URL
+): Promise<CivitAIModel> {
   await delay(API_RATE_LIMIT_DELAY_MS);
-  return request<CivitAIModel>(`/models/${modelId}`, apiKey);
+  return request<CivitAIModel>(`/models/${modelId}`, apiKey, undefined, apiBaseUrl);
 }
 
 export async function fetchUserArticles(
   apiKey: string,
-  username: string
+  username: string,
+  apiBaseUrl = CIVITAI_API_BASE_URL
 ): Promise<CivitAIListResponse<CivitAIArticle>> {
   const params = new URLSearchParams({ username, limit: '100' });
   await delay(API_RATE_LIMIT_DELAY_MS);
-  return request<CivitAIListResponse<CivitAIArticle>>('/articles', apiKey, params);
+  return request<CivitAIListResponse<CivitAIArticle>>('/articles', apiKey, params, apiBaseUrl);
 }
 
 export interface TrendingModelFilters {
@@ -238,7 +268,8 @@ export interface TrendingModelFilters {
 
 export async function fetchTrendingModels(
   apiKey: string,
-  filters: TrendingModelFilters = {}
+  filters: TrendingModelFilters = {},
+  apiBaseUrl = CIVITAI_API_BASE_URL
 ): Promise<CivitAIListResponse<CivitAIModel>> {
   const params = new URLSearchParams({
     sort: 'Most Downloaded',
@@ -258,5 +289,5 @@ export async function fetchTrendingModels(
     params.set('tag', filters.tag);
   }
 
-  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params);
+  return request<CivitAIListResponse<CivitAIModel>>('/models', apiKey, params, apiBaseUrl);
 }

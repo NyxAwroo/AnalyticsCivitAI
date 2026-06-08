@@ -12,6 +12,12 @@ export default defineConfig({
   build: {
     emptyOutDir: true,
     outDir: 'dist',
-    chunkSizeWarningLimit: 650
+    chunkSizeWarningLimit: 650,
+    rollupOptions: {
+      input: {
+        popup: 'popup.html',
+        analytics: 'analytics.html'
+      }
+    }
   }
 });

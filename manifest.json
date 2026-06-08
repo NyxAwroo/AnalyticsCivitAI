@@ -21,11 +21,11 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["alarms", "storage", "identity", "notifications", "activeTab", "tabs"],
-  "host_permissions": ["https://civitai.com/*"],
+  "permissions": ["alarms", "storage", "identity", "notifications", "activeTab", "tabs", "contextMenus"],
+  "host_permissions": ["https://civitai.com/*", "https://civitai.red/*"],
   "content_scripts": [
     {
-      "matches": ["https://civitai.com/models/*"],
+      "matches": ["https://civitai.com/models/*", "https://civitai.red/models/*"],
       "js": ["src/content/civitai-inject.ts"],
       "run_at": "document_idle"
     }

@@ -1,4 +1,4 @@
-import { Activity, Database, Download, Heart, MessageCircle, RefreshCw, Trophy } from 'lucide-react';
+import { Activity, AlertTriangle, Database, Download, Heart, MessageCircle, RefreshCw, Trophy } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import ModelRow from '../components/ModelRow';
@@ -12,6 +12,7 @@ import {
   type ModelSnapshot,
   type TrackedModel
 } from '../../storage/db';
+import { COLLECTION_PROGRESS_KEY } from '../../utils/constants';
 import {
   calculateHealthScore,
   calculateDeltaForPeriod,
@@ -27,7 +28,9 @@ export default function Dashboard(): JSX.Element {
   const [snapshots, setSnapshots] = useState<Map<number, ModelSnapshot>>(new Map());
   const [histories, setHistories] = useState<Map<number, ModelSnapshot[]>>(new Map());
   const [lastCollectedAt, setLastCollectedAt] = useState(0);
+  const [lastCollectionErrors, setLastCollectionErrors] = useState(0);
   const [isCollecting, setIsCollecting] = useState(false);
+  const [collectionProgress, setCollectionProgress] = useState({ current: 0, total: 0, label: '' });
   const [error, setError] = useState('');
 
   async function loadData(): Promise<void> {
@@ -44,11 +47,52 @@ export default function Dashboard(): JSX.Element {
     setSnapshots(latestSnapshots);
     setHistories(modelHistories);
     setLastCollectedAt(settings.lastCollectedAt);
+    setLastCollectionErrors(settings.lastCollectionErrors);
   }
 
   useEffect(() => {
     void loadData();
   }, []);
+
+  useEffect(() => {
+    async function readProgress(): Promise<void> {
+      const stored = await chrome.storage.local.get(COLLECTION_PROGRESS_KEY);
+      const value = stored[COLLECTION_PROGRESS_KEY] as
+        | { isCollecting?: boolean; current?: number; total?: number; label?: string }
+        | undefined;
+
+      if (value?.isCollecting) {
+        setIsCollecting(true);
+        setCollectionProgress({
+          current: value.current ?? 0,
+          total: value.total ?? 0,
+          label: value.label ?? ''
+        });
+      } else if (!value?.isCollecting && isCollecting) {
+        setCollectionProgress({ current: 0, total: 0, label: '' });
+      }
+    }
+
+    const interval = window.setInterval(() => {
+      void readProgress();
+    }, 700);
+
+    void readProgress();
+    return () => window.clearInterval(interval);
+  }, [isCollecting]);
+
+  useEffect(() => {
+    function handleRefreshShortcut(): void {
+      if (!isCollecting) {
+        void handleCollect();
+      }
+    }
+
+    window.addEventListener('analytics-civitai-refresh', handleRefreshShortcut);
+    return () => window.removeEventListener('analytics-civitai-refresh', handleRefreshShortcut);
+    // handleCollect is a local command handler; this listener only needs the current collecting flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCollecting]);
 
   const totals = useMemo(() => {
     let downloads = 0;
@@ -139,6 +183,7 @@ export default function Dashboard(): JSX.Element {
       setError(message);
     } finally {
       setIsCollecting(false);
+      setCollectionProgress({ current: 0, total: 0, label: '' });
     }
   }
 
@@ -196,13 +241,35 @@ export default function Dashboard(): JSX.Element {
           className="inline-flex h-9 items-center gap-2 rounded bg-violet-600 px-3 text-xs font-semibold text-white transition hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <RefreshCw className={`h-4 w-4 ${isCollecting ? 'animate-spin' : ''}`} />
-          {isCollecting ? 'Collecte' : 'Rafraîchir'}
+          {isCollecting && collectionProgress.total > 0
+            ? `${collectionProgress.current}/${collectionProgress.total}`
+            : isCollecting
+              ? 'Collecte'
+              : 'Rafraîchir'}
         </button>
       </div>
+
+      {isCollecting ? (
+        <div className="rounded border border-violet-300/30 bg-violet-500/10 p-3 text-sm text-violet-100">
+          Collecte en cours
+          {collectionProgress.total > 0
+            ? ` : ${collectionProgress.current}/${collectionProgress.total}`
+            : ''}
+          {collectionProgress.label ? ` · ${collectionProgress.label}` : ''}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded border border-rose-400/30 bg-rose-500/10 p-3 text-sm text-rose-100">
           {error}
+        </div>
+      ) : null}
+
+      {!error && lastCollectionErrors > 0 ? (
+        <div className="flex items-center gap-2 rounded border border-amber-300/30 bg-amber-400/10 p-3 text-sm text-amber-100">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          Dernière collecte partielle : {lastCollectionErrors} élément
+          {lastCollectionErrors > 1 ? 's' : ''} non collecté{lastCollectionErrors > 1 ? 's' : ''}.
         </div>
       ) : null}
 

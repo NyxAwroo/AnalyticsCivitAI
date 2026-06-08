@@ -78,7 +78,7 @@ function rowsToCsv(rows: Array<Record<string, unknown>>): string {
   return lines.join('\n');
 }
 
-export async function exportAllDataAsJson(): Promise<void> {
+export async function exportAllDataAsJson(filename = 'analytics-civitai-export.json'): Promise<void> {
   const bundle: ExportBundle = {
     exportedAt: new Date().toISOString(),
     settings: await db.settings.get('main'),
@@ -91,7 +91,7 @@ export async function exportAllDataAsJson(): Promise<void> {
     tagSnapshots: await db.tagSnapshots.toArray()
   };
 
-  downloadTextFile('analytics-civitai-export.json', JSON.stringify(bundle, null, 2), 'application/json');
+  downloadTextFile(filename, JSON.stringify(bundle, null, 2), 'application/json');
 }
 
 function readFileAsText(file: File): Promise<string> {
@@ -186,7 +186,8 @@ export async function exportModelSnapshotsAsCsv(): Promise<void> {
     comments: snapshot.comments,
     rating: snapshot.rating,
     ratingCount: snapshot.ratingCount,
-    buzzTipped: snapshot.buzzTipped ?? 0
+    buzzTipped: snapshot.buzzTipped ?? 0,
+    generationCount: snapshot.generationCount ?? 0
   }));
 
   downloadTextFile('analytics-civitai-model-snapshots.csv', rowsToCsv(rows), 'text/csv');
